@@ -1,3 +1,4 @@
+import torch
 from torch import nn, reshape
 from torch import device as torch_device
 
@@ -32,10 +33,12 @@ class Simple(nn.Module):
 		else:
 			batch_size = 1
 		shape_saved = _input.shape
-		_input = reshape(_input, (batch_size,-1))
-		_input = self.linear(_input)
-		_input = reshape(_input, shape_saved)	
-		return None, _input
+		std = torch.std(_input)
+		_input = _input/std
+		_res = reshape(_input, (batch_size,-1))
+		_res = self.linear(_res)
+		_res = reshape(_res, shape_saved)	
+		return None, (_input+_res)*std
 
 	@property
 	def is_recursive(self):

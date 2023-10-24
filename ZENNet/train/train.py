@@ -7,14 +7,6 @@ from ZENNet.loss.loss import mseloss
 from ZENNet.model.simple import Simple
 from ZENNet.model.simple_norecursive import Simple_NR
 
-# some arguments
-dump_dir = Path("/home/zhou/Data/study/denoiser/dnn/ZENNet/dump")
-target_stride = 4000
-target_sample_rate = 44100
-target_samples =4410 
-target_channels =1 
-chunk_size =4410 *40*2//1000	# target at 40ms
-
 # config device
 if torch.cuda.is_available():
 	device = "cuda"
@@ -23,6 +15,16 @@ if torch.cuda.is_available():
 	torch.cuda.empty_cache()
 else:
 	device = "cpu"
+
+# some arguments
+dump_dir = Path("/home/zhou/Data/study/denoiser/dnn/ZENNet/dump")
+target_stride = 4000
+target_sample_rate = 44100
+target_samples =220500 
+target_channels =2 
+chunk_size =4410 *40*2//1000 //2*2	# target at 40ms
+chunk_stride = chunk_size // 2 
+window = torch.sqrt(torch.hann_window(chunk_size, device=device))[None,:,None]
 
 def recursive_loop(voice, noisy, model, loss_func):
 	"""
@@ -40,11 +42,14 @@ def recursive_loop(voice, noisy, model, loss_func):
 		loss
 	"""
 	hidden_state = None
-	for iteration in range(target_samples//chunk_size):
-		start = iteration*chunk_size
+	for i in range((target_samples-chunk_size)//chunk_stride +1):
+		start = i*chunk_stride
 		end = start+chunk_size
-		hidden_state, recover = model(hidden_state, noisy[:,start:end,:])
-	return loss_func(recover, voice[:,start:end,:])
+		hidden_state, recover = model(hidden_state, noisy[:,start:end,:]*window)
+	loss =loss_func(recover, voice[:,start:end,:]*window) 
+	print(loss*100)
+	print(loss_func(noisy[:,start:end,:]*window, voice[:,start:end,:]*window)*100)
+	return loss
 
 def recursive_loop_all(voice, noisy, model, loss_func):
 	"""
@@ -62,13 +67,15 @@ def recursive_loop_all(voice, noisy, model, loss_func):
 		Output tensor of shape (batch_size, target_samples, channels)
 		the recoverd voice of last iteration
 	"""
+	# TODO add window funtion
 	hidden_state = None
-	recover_all = torch.empty([target_samples, target_channels]).to(device)
-	for iteration in range(target_samples//chunk_size):
-		start = iteration*chunk_size
+	batch_size = voice.shape[0]
+	recover_all = torch.zeros([batch_size,target_samples, target_channels]).to(device)
+	for iteration in range((target_samples-chunk_size)//chunk_stride +1):
+		start = iteration*chunk_stride
 		end = start+chunk_size
-		hidden_state, recover = model(hidden_state, noisy[0,start:end,:])
-		recover_all[:,start: end,:] = recover.detach().clone()
+		hidden_state, recover = model(hidden_state, noisy[0,start:end,:]*window)
+		recover_all[:,start: end,:] += recover.detach().clone()*window
 	return None, recover_all
 
 def train():
@@ -83,14 +90,14 @@ def train():
 	noise_dataloader = DataLoader(noise_dataset, batch_size=64, shuffle=True)
 
 	# create the model
-	model = Simple_NR(target_samples, chunk_size, target_channels, device)
+	model = Simple(target_samples, chunk_size, target_channels, device)
 	model.to(device)
 
 	# create loss function
 	loss_func = mseloss
 
 	# create the optimizer
-	optimizer = torch.optim.SGD(model.parameters(), lr=3)
+	optimizer = torch.optim.SGD(model.parameters(), lr=100)
 	#optimizer = torch.optim.Adam(model.parameters(), lr=0.0001 )
 
 	running_loss = 0.0
@@ -100,10 +107,6 @@ def train():
 		voice = next(iter(chinese_dataloader))
 		noise = next(iter(noise_dataloader))
 		# voice, noise has same shape (N, samples, channels)
-			
-		#voice = voice/torch.std(voice)
-		#noise = noise/torch.std(noise)
-
 		noisy = voice + noise
 
 		hidden_state = None
@@ -118,7 +121,6 @@ def train():
 		weight =model.linear.weight.detach().clone()
 		print(f"epoch {epoch}")
 		#print(torch.sum(weight,1))
-		print(loss)
 		#print(mseloss(voice[:,start:end,:]+noise[:,start:end,:], voice[:,start: end,:]))
 
 		if(epoch%10==1):
