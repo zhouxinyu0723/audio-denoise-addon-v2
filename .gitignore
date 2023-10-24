@@ -9,4 +9,5 @@ venv
 .venv
 ZENNet.egg-info/
 **.pyc
+**.*.swp
 **/__pycache__/
