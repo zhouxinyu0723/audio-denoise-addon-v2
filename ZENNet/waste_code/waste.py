@@ -1,0 +1,5 @@
+#fig, ax = plt.subplots(3,1)
+#ax[0].plot(np.linspace(0, 100, chunk_size), _windowDIV_template.numpy())
+#ax[1].plot(np.linspace(0, 100, chunk_size), _windowMUL.numpy())
+#ax[2].plot(np.linspace(0, 100, target_samples), windowMUL.numpy())
+#plt.show()

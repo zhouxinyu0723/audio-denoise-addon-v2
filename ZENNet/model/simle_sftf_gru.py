@@ -11,9 +11,7 @@ class Simple_fft(nn.Module):
 		super().__init__()
 		self.chunk_size = chunk_size
 		self.channels = channels
-		self.linear = nn.Linear(self.chunk_size*self.channels, self.chunk_size*self.channels, bias=True, device = device)
-		self.linear2 = nn.Linear(self.chunk_size*self.channels, self.chunk_size*self.channels, bias=True, device = device)
-		self.linear3 = nn.Linear(self.chunk_size*self.channels, self.chunk_size*self.channels, bias=True, device = device)
+		self.gru = nn.GRU(chunk_size, hidden_size = chunk_size, num_layers=1, bias=True, batch_first=True, 
 	
 	def forward(self, state, _input):
 		"""

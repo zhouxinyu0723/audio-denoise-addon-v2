@@ -1,5 +1,5 @@
 from math import pi
-from random import randint
+from random import randrange, randint
 from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
@@ -7,10 +7,11 @@ import torch
 from torch.utils.data import Dataset, random_split, DataLoader
 import torchaudio
 from ZENNet.dataset.dataset import ZENNetAudioDataset
-from ZENNet.loss.loss import mseloss
+from ZENNet.loss.loss import mseloss, sftf_loss_prepare
 from ZENNet.model.simple import Simple
 from ZENNet.model.simle_fft import Simple_fft
 from ZENNet.model.simple_norecursive import Simple_NR
+from ZENNet.signalprocessing.sftf import hann_window, isftf_recover_coef, sftf_a_trace
 
 # config device
 if torch.cuda.is_available():
@@ -30,48 +31,27 @@ target_channels =2
 chunk_overlap = 3
 chunk_size =4410 *40*2//1000 //chunk_overlap*chunk_overlap	# target at 40ms
 chunk_stride = chunk_size // chunk_overlap 
-angle_speed = pi/chunk_size
-#windowF2T = torch.hann_window(chunk_size)
-windowF2T = torch.square(torch.sin((torch.arange(chunk_size)+0.5)*angle_speed))
-windowT2F = windowF2T
-_windowDIV = torch.zeros(windowF2T.shape)
-_windowDIV_template = windowF2T*windowT2F
-for i in range(chunk_overlap):
-	if i==0:
-		_windowDIV += _windowDIV_template.clone()
-	else:
-		_windowDIV[i*chunk_stride:] += _windowDIV_template[:chunk_size-i*chunk_stride]
-		_windowDIV[:chunk_size-i*chunk_stride] += _windowDIV_template[i*chunk_stride:]
-_windowMUL = 1/_windowDIV
+assert target_samples > chunk_size + chunk_stride
 
-#for i in range((target_samples-chunk_size)//chunk_stride +1):
-#	start = i*chunk_stride
-#	end = start+chunk_size
-#	windowDIV[start: end] += _windowDIV_template
-#windowMUL = 1/windowDIV
-windowMUL = torch.zeros(target_samples)
-for i in range(target_samples//chunk_size):
- start = i*chunk_size
- end = start+chunk_size
- windowMUL[start: end] += _windowMUL
+# prepare windows
+def isftf_recover_coeff_all(sftf_window, isftf_window, chunk_stride, target_samples):
+	chunk_size = sftf_window.shape[0]
+	recover_coeff = isftf_recover_coef(sftf_window, isftf_window, chunk_stride)
+	recover_coeff_all = torch.zeros(target_samples).to(device)
+	for i in range(target_samples//chunk_size):
+		start = i*chunk_size
+		end = start+chunk_size
+		recover_coeff_all[start: end] = recover_coeff
+	return recover_coeff_all
 
+isftf_window = hann_window(chunk_size).to(device)
+sftf_window = hann_window(chunk_size).to(device)
+recover_coeff_all = isftf_recover_coeff_all(sftf_window, isftf_window, chunk_stride, target_samples)
+isftf_window = isftf_window[None, :, None]
+sftf_window = sftf_window[None, :, None]
+recover_coeff_all = recover_coeff_all[None, :, None]
 
-#fig, ax = plt.subplots(3,1)
-#ax[0].plot(np.linspace(0, 100, chunk_size), _windowDIV_template.numpy())
-#ax[1].plot(np.linspace(0, 100, chunk_size), _windowMUL.numpy())
-#ax[2].plot(np.linspace(0, 100, target_samples), windowMUL.numpy())
-#plt.show()
-
-windowF2T = windowF2T.to(device)[None,:,None]
-windowT2F = windowT2F.to(device)[None,:,None]
-_windowMUL = _windowMUL.to(device)[None,:,None]
-windowMUL = windowMUL.to(device)[None,:,None]
-
-#windowT2F = torch.sin((torch.arange(chunk_size)+0.5)*angle_speed)[None,:,None].to(device)
-
-
-
-def recursive_loop(voice, noisy, model, loss_func):
+def recursive_loop(voice, noisy, model):
 	"""
 	Brief
 	----------
@@ -92,6 +72,9 @@ def recursive_loop(voice, noisy, model, loss_func):
 	-------
 	Tensor Value
 		loss
+	Tensor
+		Output tensor of shape (batch_size, target_samples, channels)
+		The recoverd audio
 	"""
 	hidden_state = None
 	batch_size = voice.shape[0]
@@ -100,35 +83,34 @@ def recursive_loop(voice, noisy, model, loss_func):
 		start = i*chunk_stride
 		end = start+chunk_size
 		with torch.no_grad():
-			noisy_T = noisy[:,start:end,:]*windowT2F
+			noisy_T = noisy[:,start:end,:]*sftf_window
 			noisy_F = torch.fft.fft(noisy_T, dim = 1)
 		hidden_state, suppression_hint = model(hidden_state, noisy_F.abs())
 		recover_abs = noisy_F.abs()*suppression_hint
 		recover_angle = noisy_F.angle()
 		recover_F = torch.polar(recover_abs, recover_angle)
 		recover_T = torch.fft.ifft(recover_F, dim = 1)
-		recover_all[:,start: end,:] += recover_T.real*windowF2T
-	recover_all *= windowMUL
+		recover_all[:,start: end,:] += recover_T.real*isftf_window
+	recover_all *= recover_coeff_all
+	# TODO wrap the following into a new loss function
 	#print(model.scale.detach())
 	#print(loss_func(voice[:,start:end,:], recover_all[:,start:end,:])*100)
 	#print(loss_func(noisy[:,start:end,:], voice[:,start:end,:])*100)
 	#return loss_func(voice[:,start:end,:], recover_all[:,start:end,:])
-	random_shift = randint(chunk_stride*(chunk_overlap-1), chunk_size+chunk_stride*(chunk_overlap-1))
-	end = max(chunk_size, target_samples - random_shift)
-	start = end - chunk_size*4
-	angle_speed = pi/chunk_size/4
-	windowT2F_large = torch.square(torch.sin((torch.arange(chunk_size*4)+0.5)*angle_speed)).to(device)[None,:,None]
-	recover_F_loss = torch.fft.fft(recover_all[:,start:end,:]*windowT2F_large, dim = 1)
-	recover_F_loss_abs = recover_F_loss.abs()
-	recover_F_loss_angle = recover_F_loss.angle()
-	with torch.no_grad():
-		voice_F_loss = torch.fft.fft(voice[:,start:end,:]*windowT2F_large, dim = 1)
-		voice_F_loss_abs = voice_F_loss.abs()
-		voice_F_loss_angle = voice_F_loss.angle()
-	loss = 0.7*loss_func(recover_F_loss_abs, voice_F_loss_abs) 
-	loss += 0.3*loss_func(recover_F_loss_angle, voice_F_loss_angle) 
-	print(loss*100)
-	print(loss_func(noisy[:,start:end,:], voice[:,start:end,:])*100)
+
+	loss_window_size = chunk_size*randint(1, min(5, target_samples//chunk_size))
+	start = randint(0, target_samples-loss_window_size-chunk_stride)
+	end = start + loss_window_size
+
+	recover_F_loss_abs, recover_F_loss_angle, voice_F_loss_abs, voice_F_loss_angle = sftf_loss_prepare(recover_all[:,start:end,:], voice[:,start:end,:])
+	loss = mseloss(torch.log(recover_F_loss_abs+1e-7), torch.log(voice_F_loss_abs+1e-7))
+	#loss += 0.3*loss_func(recover_F_loss_angle, voice_F_loss_angle) 
+	print(torch.mean(suppression_hint).to("cpu"))
+	print(loss.to("cpu")*100)
+
+	noisy_F_loss_abs, noisy_F_loss_angle, voice_F_loss_abs, voice_F_loss_angle = sftf_loss_prepare(noisy[:,start:end,:], voice[:,start:end,:])
+	loss_ref = mseloss(torch.log(noisy_F_loss_abs+1e-7), torch.log(voice_F_loss_abs+1e-7))
+	print(loss_ref.to("cpu")*100)
 	return loss, recover_all
 
 def train():
@@ -146,11 +128,8 @@ def train():
 	model = Simple_fft(target_samples, chunk_size, target_channels, device)
 	model.to(device)
 
-	# create loss function
-	loss_func = mseloss
-
 	# create the optimizer
-	optimizer = torch.optim.SGD(model.parameters(), lr=0.001)
+	optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
 	#optimizer = torch.optim.Adam(model.parameters(), lr=0.0001 )
 
 	running_loss = 0.0
@@ -162,15 +141,18 @@ def train():
 		# voice, noise has same shape (N, samples, channels)
 		noisy = voice + noise
 
+		# noisy_F = sftf_a_trace(noisy, sftf_window, chunk_stride)
+
 		hidden_state = None
 		if(model.is_recursive):
-			loss, recover_all = recursive_loop(voice, noisy, model, loss_func)
+			loss, recover_all = recursive_loop(voice, noisy, model)
 		else:
-			recover = model(noisy)
-			loss = loss_func(recover, voice)
-		#loss.backward()
-		#torch.nn.utils.clip_grad_norm_(model.parameters(), 0.01)
-		#optimizer.step()
+			# recover = model(noisy)
+			raise NotImplementedError
+			# loss = loss_func(recover, voice)
+		loss.backward()
+		torch.nn.utils.clip_grad_norm_(model.parameters(), 0.01)
+		optimizer.step()
 		#weight =model.linear.weight.detach().clone()
 		print(f"epoch {epoch}")
 		#print(torch.sum(weight,1))
@@ -180,9 +162,10 @@ def train():
 			model.eval()
 			with torch.no_grad():
 				if(model.is_recursive):
-					loss, recover_all = recursive_loop(voice, noisy, model, mseloss)
+					loss, recover_all = recursive_loop(voice, noisy, model)
 				else:
-					recover_all = model(noisy)
+					raise NotImplementedError
+					# recover_all = model(noisy)
 				torchaudio.save(dump_dir/f"origin_{epoch}.wav", voice[0,:,:].to("cpu")
 ,	target_sample_rate,False,"wav","PCM_F")
 				torchaudio.save(dump_dir/f"noisy_{epoch}.wav", noise[0,:,:].to("cpu")
