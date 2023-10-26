@@ -11,7 +11,7 @@ from ZENNet.loss.loss import mseloss, sftf_loss_prepare
 from ZENNet.model.simple import Simple
 from ZENNet.model.simle_fft import Simple_fft
 from ZENNet.model.simple_norecursive import Simple_NR
-from ZENNet.signalprocessing.sftf import hann_window, isftf_recover_coef, sftf_a_trace
+from ZENNet.signalprocessing.sftf import hann_window, isftf_recover_coef, sftf_a_trace, isftf_a_trace
 
 # config device
 if torch.cuda.is_available():
@@ -27,11 +27,17 @@ dump_dir = Path("/home/zhou/Data/study/denoiser/dnn/ZENNet/dump")
 target_stride = 4000
 target_sample_rate = 44100
 target_samples =220500 
-target_channels =2 
+target_channels =2
+window_len = 4410 *40*2//1000 # target at 40ms
 chunk_overlap = 3
-chunk_size =4410 *40*2//1000 //chunk_overlap*chunk_overlap	# target at 40ms
-chunk_stride = chunk_size // chunk_overlap 
-assert target_samples > chunk_size + chunk_stride
+
+# round up arguments
+# so that target_samples are multiples of window_len
+# so that window_len are multiples of window_stride
+window_len = window_len//chunk_overlap*chunk_overlap	
+window_stride = window_len // chunk_overlap
+target_samples = target_samples//window_len*window_len
+assert target_samples >= 2*window_len
 
 # prepare windows
 def isftf_recover_coeff_all(sftf_window, isftf_window, chunk_stride, target_samples):
@@ -44,9 +50,9 @@ def isftf_recover_coeff_all(sftf_window, isftf_window, chunk_stride, target_samp
 		recover_coeff_all[start: end] = recover_coeff
 	return recover_coeff_all
 
-isftf_window = hann_window(chunk_size).to(device)
-sftf_window = hann_window(chunk_size).to(device)
-recover_coeff_all = isftf_recover_coeff_all(sftf_window, isftf_window, chunk_stride, target_samples)
+isftf_window = hann_window(window_len).to(device)
+sftf_window = hann_window(window_len).to(device)
+recover_coeff_all = isftf_recover_coeff_all(sftf_window, isftf_window, window_stride, target_samples)
 isftf_window = isftf_window[None, :, None]
 sftf_window = sftf_window[None, :, None]
 recover_coeff_all = recover_coeff_all[None, :, None]
@@ -79,9 +85,9 @@ def recursive_loop(voice, noisy, model):
 	hidden_state = None
 	batch_size = voice.shape[0]
 	recover_all = torch.zeros([batch_size,target_samples, target_channels]).to(device)
-	for i in range((target_samples-chunk_size)//chunk_stride +1):
-		start = i*chunk_stride
-		end = start+chunk_size
+	for i in range((target_samples-window_len)//window_stride +1):
+		start = i*window_stride
+		end = start+window_len
 		with torch.no_grad():
 			noisy_T = noisy[:,start:end,:]*sftf_window
 			noisy_F = torch.fft.fft(noisy_T, dim = 1)
@@ -98,8 +104,8 @@ def recursive_loop(voice, noisy, model):
 	#print(loss_func(noisy[:,start:end,:], voice[:,start:end,:])*100)
 	#return loss_func(voice[:,start:end,:], recover_all[:,start:end,:])
 
-	loss_window_size = chunk_size*randint(1, min(5, target_samples//chunk_size))
-	start = randint(0, target_samples-loss_window_size-chunk_stride)
+	loss_window_size = window_len*randint(1, min(5, target_samples//window_len))
+	start = randint(0, target_samples-loss_window_size-window_stride)
 	end = start + loss_window_size
 
 	recover_F_loss_abs, recover_F_loss_angle, voice_F_loss_abs, voice_F_loss_angle = sftf_loss_prepare(recover_all[:,start:end,:], voice[:,start:end,:])
@@ -125,7 +131,7 @@ def train():
 	noise_dataloader = DataLoader(noise_dataset, batch_size=8, shuffle=True)
 
 	# create the model
-	model = Simple_fft(target_samples, chunk_size, target_channels, device)
+	model = Simple_fft(target_samples, window_len, target_channels, device)
 	model.to(device)
 
 	# create the optimizer
@@ -141,7 +147,7 @@ def train():
 		# voice, noise has same shape (N, samples, channels)
 		noisy = voice + noise
 
-		# noisy_F = sftf_a_trace(noisy, sftf_window, chunk_stride)
+		noisy_T = sftf_a_trace(noisy, sftf_window, window_stride)
 
 		hidden_state = None
 		if(model.is_recursive):

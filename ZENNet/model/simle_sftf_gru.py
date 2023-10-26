@@ -11,7 +11,7 @@ class Simple_fft(nn.Module):
 		super().__init__()
 		self.chunk_size = chunk_size
 		self.channels = channels
-		self.gru = nn.GRU(chunk_size, hidden_size = chunk_size, num_layers=1, bias=True, batch_first=True, 
+	
 	
 	def forward(self, state, _input):
 		"""
