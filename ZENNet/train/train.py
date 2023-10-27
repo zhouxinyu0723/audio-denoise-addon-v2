@@ -10,6 +10,7 @@ from ZENNet.dataset.dataset import ZENNetAudioDataset
 from ZENNet.loss.loss import mseloss, sftf_loss_prepare
 from ZENNet.model.simple import Simple
 from ZENNet.model.simle_fft import Simple_fft
+from ZENNet.model.simleStftGru import SimpleStftGru
 from ZENNet.model.simple_norecursive import Simple_NR
 from ZENNet.signalprocessing.sftf import hann_window, isftf_recover_coef, sftf_a_trace, isftf_a_trace
 
@@ -85,6 +86,8 @@ def recursive_loop(voice, noisy, model):
 	hidden_state = None
 	batch_size = voice.shape[0]
 	recover_all = torch.zeros([batch_size,target_samples, target_channels]).to(device)
+	avg_hidden = 0
+	avg_hidden_std = 0
 	for i in range((target_samples-window_len)//window_stride +1):
 		start = i*window_stride
 		end = start+window_len
@@ -97,6 +100,11 @@ def recursive_loop(voice, noisy, model):
 		recover_F = torch.polar(recover_abs, recover_angle)
 		recover_T = torch.fft.ifft(recover_F, dim = 1)
 		recover_all[:,start: end,:] += recover_T.real*isftf_window
+		avg_hidden += torch.mean(hidden_state).detach().to("cpu").numpy().item()
+		avg_hidden_std += torch.std(hidden_state).detach().to("cpu").numpy().item()
+	avg_hidden /= (target_samples-window_len)//window_stride +1
+	print(avg_hidden)
+	print(avg_hidden_std)
 	recover_all *= recover_coeff_all
 	# TODO wrap the following into a new loss function
 	#print(model.scale.detach())
@@ -105,18 +113,21 @@ def recursive_loop(voice, noisy, model):
 	#return loss_func(voice[:,start:end,:], recover_all[:,start:end,:])
 
 	loss_window_size = window_len*randint(1, min(5, target_samples//window_len))
-	start = randint(0, target_samples-loss_window_size-window_stride)
+	start = randint(max(0,target_samples-loss_window_size-window_stride-2*window_len), target_samples-loss_window_size-window_len)
 	end = start + loss_window_size
 
 	recover_F_loss_abs, recover_F_loss_angle, voice_F_loss_abs, voice_F_loss_angle = sftf_loss_prepare(recover_all[:,start:end,:], voice[:,start:end,:])
-	loss = mseloss(torch.log(recover_F_loss_abs+1e-7), torch.log(voice_F_loss_abs+1e-7))
+	avg_db = torch.mean(torch.log(voice_F_loss_abs+1e-7),  1, True)
+	loss = mseloss(torch.clamp(torch.log(recover_F_loss_abs+1e-7), min=avg_db-20), torch.clamp(torch.log(voice_F_loss_abs+1e-7), min=avg_db-20))
 	#loss += 0.3*loss_func(recover_F_loss_angle, voice_F_loss_angle) 
 	print(torch.mean(suppression_hint).to("cpu"))
 	print(loss.to("cpu")*100)
 
 	noisy_F_loss_abs, noisy_F_loss_angle, voice_F_loss_abs, voice_F_loss_angle = sftf_loss_prepare(noisy[:,start:end,:], voice[:,start:end,:])
-	loss_ref = mseloss(torch.log(noisy_F_loss_abs+1e-7), torch.log(voice_F_loss_abs+1e-7))
+	loss_ref = mseloss(torch.clamp(torch.log(noisy_F_loss_abs+1e-7), min=avg_db-20), torch.clamp(torch.log(voice_F_loss_abs+1e-7), min=avg_db-20))
 	print(loss_ref.to("cpu")*100)
+	print(loss/loss_ref*100)
+
 	return loss, recover_all
 
 def train():
@@ -131,7 +142,7 @@ def train():
 	noise_dataloader = DataLoader(noise_dataset, batch_size=8, shuffle=True)
 
 	# create the model
-	model = Simple_fft(target_samples, window_len, target_channels, device)
+	model = SimpleStftGru(target_samples, window_len, target_channels, device)
 	model.to(device)
 
 	# create the optimizer
@@ -147,9 +158,10 @@ def train():
 		# voice, noise has same shape (N, samples, channels)
 		noisy = voice + noise
 
-		noisy_T = sftf_a_trace(noisy, sftf_window, window_stride)
+		noisy_F = sftf_a_trace(noisy, window_stride, sftf_window)
+		
 
-		hidden_state = None
+
 		if(model.is_recursive):
 			loss, recover_all = recursive_loop(voice, noisy, model)
 		else:

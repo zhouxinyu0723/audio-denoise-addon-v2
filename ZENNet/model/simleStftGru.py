@@ -1,8 +1,9 @@
 import torch
 from torch import nn, reshape
-from torch import device as torch_device
 
-class Simple_fft(nn.Module):
+from ZENNet.model.unpackedGru import UnpackedGru
+
+class SimpleStftGru(nn.Module):
 	"""
 	Simple model
 	use mlp to do denoise	
@@ -11,7 +12,10 @@ class Simple_fft(nn.Module):
 		super().__init__()
 		self.chunk_size = chunk_size
 		self.channels = channels
-	
+		self.device = device
+		self.input_map = nn.Linear(self.chunk_size*self.channels, self.chunk_size*self.channels, bias=True, device = device)
+		self.unpacked_gru = UnpackedGru(self.chunk_size*self.channels, self.chunk_size*self.channels, bias=True, device = device)
+		self.state_input2output = nn.Linear(2*self.chunk_size*self.channels, self.chunk_size*self.channels, bias=True, device = device)	
 	
 	def forward(self, state, _input):
 		"""
@@ -35,18 +39,15 @@ class Simple_fft(nn.Module):
 			batch_size = _input.shape[0]
 		else:
 			batch_size = 1
+		if state == None:
+			state = torch.zeros([batch_size, self.chunk_size*self.channels]).to(self.device)
 		shape_saved = _input.shape
-		#_input = torch.log(_input)
-		#std = torch.std(_input)
-		#_input = _input/std
 		_input = reshape(_input, (batch_size,-1))
-		_input = self.linear(_input)
-		_input = nn.functional.relu(_input)
-		_input = self.linear2(_input)
-		_input = nn.functional.relu(_input)
-		_input = self.linear3(_input)
-		_input = reshape(_input, shape_saved)	
-		return None, torch.sigmoid(_input)
+		_input_mapped = nn.functional.relu(self.input_map(_input))
+		_state = self.unpacked_gru(state, _input)
+		_output = torch.sigmoid(self.state_input2output(torch.cat([_state, _input_mapped], dim=1)))
+		_output = reshape(_output, shape_saved)	
+		return _state, _output
 
 	@property
 	def is_recursive(self):

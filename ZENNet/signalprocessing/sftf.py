@@ -101,34 +101,33 @@ def sftf_a_trace(audio: torch.Tensor, window: torch.Tensor, stride: int):
 		audio_in_freq[i,:,:,:] = sftf_a_frame(audio[:,i*stride:i*stride+window_size,:], window)[None,:,:,:]
 	return audio_in_freq
 
-def isftf_a_trace(audio_in_freq: torch.Tensor, window: torch.Tensor, recover_coeff: torch.Tensor, stride: int):
+def isftf_a_trace(audio_in_freq: torch.Tensor, stride: int, sftf_window: torch.Tensor, isftf_window: torch.Tensor):
 	"""
 	audio_in_freq : Tensor
 		Input tensor of shape (frames, batch_size, window_size, channels)
-	window : Tensor
-		Window of shape (window_size,) or of shape (1, window_size, 1)
-		, multiplied after ISTFT
-	recover_coeff : Tensor
-		Window of shape (window_size,) or of shape (1, window_size, 1)
-		, multiplied after ISTFT merge
 	stride : int
 		Stride of the window
-	
+	sftf_window : Tensor
+		Window of shape (window_size,) or of shape (1, window_size, 1)
+		, multiplied after ISTFT
+	isftf_window : Tensor
+		Window of shape (window_size,) or of shape (1, window_size, 1)
+		, multiplied before ISTFT
 	Returns
 	----------
 	Tensor
 		Window of shape (batch_size, samples, channels)
 	"""
 	# assertions
-	assert audio_in_freq.get_device() == window.get_device()
+	assert audio_in_freq.get_device() == isftf_window.get_device()
 	assert len(audio_in_freq.shape) == 4
-	if len(window.shape) == 1:
-		window = window[None,:,None]
-	assert len(window.shape) == 3
-	if len(recover_coeff.shape) == 1:
-		recover_coeff = recover_coeff[None,:,None]
-	assert len(recover_coeff.shape) == 3
-	assert recover_coeff.shape[1] == window.shape[1]
+	if len(sftf_window.shape) == 1:
+		sftf_window = sftf_window[None,:,None]
+	assert len(sftf_window.shape) == 3
+	if len(isftf_window.shape) == 1:
+		isftf_window = isftf_window[None,:,None]
+	assert len(isftf_window.shape) == 3
+	assert sftf_window.shape[1] == isftf_window.shape[1]
 	# sftf
 	frames, batch_size, window_size, channels = audio_in_freq.shape
 	samples = (frames-1)*stride+window_size
@@ -136,12 +135,12 @@ def isftf_a_trace(audio_in_freq: torch.Tensor, window: torch.Tensor, recover_coe
 	device = "cuda" if audio_in_freq.get_device() != -1 else "cpu"
 	isftf_output_shape = [batch_size,samples,channels]
 	audio = torch.zeros(isftf_output_shape, device=device, dtype=torch.cfloat)
+	recover_devider = torch.zeros([1,samples,1], device=device)
+	tmp = sftf_window*isftf_window
 	for i in range(frames):
-		audio[:,i*stride:i*stride+window_size,:] += torch.fft.ifft(torch.squeeze(audio_in_freq[i,:,:,:]), dim = 1)*window
-	for i in range(samples // window_size):
-		audio[:,i*window_size:(i+1)*window_size,:] *= recover_coeff
-	return audio
-
+		audio[:,i*stride:i*stride+window_size,:] += torch.fft.ifft(torch.squeeze(audio_in_freq[i,:,:,:]), dim = 1)*isftf_window
+		recover_devider[:,i*stride:i*stride+window_size,:] += tmp
+	return audio/recover_devider
 
 def main():
 	a = torch.randn(5,120,2)
@@ -149,7 +148,7 @@ def main():
 	w = hann_window(30)
 	stride = 10
 	a_T = sftf_a_trace(a, w, stride)
-	a_F = isftf_a_trace(a_T, w, isftf_recover_coef(w, w, stride), stride)
+	a_F = isftf_a_trace(a_T, stride, w, w)
 
 	from matplotlib import pyplot as plt
 	import numpy as np
