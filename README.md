@@ -7,7 +7,7 @@ dump path is a directory will recovered audio file is stored, so that the qualit
 
 
 enter the python environment
-install pytorch https://pytorch.org/get-started/locally/
+install pytorch https://pytorch.org/get-started/locally/ check your cuda version with `nvidia-smi`
 
 run
 ```
