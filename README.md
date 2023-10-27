@@ -7,6 +7,7 @@ dump path is a directory will recovered audio file is stored, so that the qualit
 
 
 enter the python environment
+install pytorch https://pytorch.org/get-started/locally/
 
 run
 ```
