@@ -13,13 +13,15 @@ def hann_window(length: int):
 	Tensor
 		Window of shape (length,), no zero value
 	"""
-	cache = {}
-	if length in cache:
-		return cache[length]
-	else:
-		angle_speed = math.pi/length
-		cache[length] = torch.square(torch.sin((torch.arange(length)+0.5)*angle_speed)) 
-		return cache[length]
+	# cache = {}
+	# if length in cache:
+	# 	return cache[length]
+	# else:
+	# 	angle_speed = math.pi/length
+	# 	cache[length] = torch.square(torch.sin((torch.arange(length)+0.5)*angle_speed)) 
+	# 	return cache[length]
+	angle_speed = math.pi/length
+	return torch.square(torch.sin((torch.arange(length)+0.5)*angle_speed)) 
 
 def isftf_recover_coef(sftf_window: torch.Tensor, isftf_window: torch.Tensor, window_stride: int):
 	"""
@@ -53,32 +55,35 @@ def isftf_recover_coef(sftf_window: torch.Tensor, isftf_window: torch.Tensor, wi
 			recover_devider[:window_size-i*window_stride] += tmp[i*window_stride:]
 	return 1/recover_devider
 
-def sftf_a_frame(frame: torch.Tensor, window: torch.Tensor):
+def sftf_a_frame(frame: torch.Tensor, window: torch.Tensor = None):
 	"""
 	frame : Tensor
 		Input tensor of shape (batch_size, samples, channels)
 	window : Tensor
 		Window of shape (window_size,) or of shape (1, window_size, 1)
 		, multiplied before STFT
+		use hanning window if None
 	"""
 	# assertions
-	assert frame.get_device() == window.get_device()
 	assert len(frame.shape) == 3
+	if window is None:
+		window = hann_window(frame.shape[1]).to(frame.get_device())[None,:,None]
 	if len(window.shape) == 1:
 		window = window[None,:,None]
+	assert frame.get_device() == window.get_device()
 	# sftf
 	audio_in_freq = torch.fft.fft(frame*window, dim = 1)
 	return audio_in_freq
 
-def sftf_a_trace(audio: torch.Tensor, window: torch.Tensor, stride: int):
+def sftf_a_trace(audio: torch.Tensor, stride: int, window: torch.Tensor):
 	"""
 	audio : Tensor
 		Input tensor of shape (batch_size, samples, channels)
+	stride : int
+		Stride of the window
 	window : Tensor
 		Window of shape (window_size,) or of shape (1, window_size, 1)
 		, multiplied before STFT
-	stride : int
-		Stride of the window
 
 	Returns
 	----------
@@ -134,11 +139,11 @@ def isftf_a_trace(audio_in_freq: torch.Tensor, stride: int, sftf_window: torch.T
 	assert samples % window_size == 0	# length of recovered audio are multiple of window_size
 	device = "cuda" if audio_in_freq.get_device() != -1 else "cpu"
 	isftf_output_shape = [batch_size,samples,channels]
-	audio = torch.zeros(isftf_output_shape, device=device, dtype=torch.cfloat)
+	audio = torch.zeros(isftf_output_shape, device=device)
 	recover_devider = torch.zeros([1,samples,1], device=device)
 	tmp = sftf_window*isftf_window
 	for i in range(frames):
-		audio[:,i*stride:i*stride+window_size,:] += torch.fft.ifft(torch.squeeze(audio_in_freq[i,:,:,:]), dim = 1)*isftf_window
+		audio[:,i*stride:i*stride+window_size,:] += torch.fft.ifft(torch.squeeze(audio_in_freq[i,:,:,:]), dim = 1).real*isftf_window
 		recover_devider[:,i*stride:i*stride+window_size,:] += tmp
 	return audio/recover_devider
 
@@ -147,7 +152,7 @@ def main():
 	a[0,:,0] = torch.linspace(0, 1, 120)
 	w = hann_window(30)
 	stride = 10
-	a_T = sftf_a_trace(a, w, stride)
+	a_T = sftf_a_trace(a, stride, w)
 	a_F = isftf_a_trace(a_T, stride, w, w)
 
 	from matplotlib import pyplot as plt

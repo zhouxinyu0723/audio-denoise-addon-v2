@@ -12,7 +12,7 @@ from ZENNet.model.simple import Simple
 from ZENNet.model.simle_fft import Simple_fft
 from ZENNet.model.simleStftGru import SimpleStftGru
 from ZENNet.model.simple_norecursive import Simple_NR
-from ZENNet.signalprocessing.sftf import hann_window, isftf_recover_coef, sftf_a_trace, isftf_a_trace
+from ZENNet.signalprocessing.sftf import hann_window, isftf_recover_coef, sftf_a_trace, isftf_a_trace, sftf_a_frame
 
 # config device
 if torch.cuda.is_available():
@@ -38,7 +38,7 @@ chunk_overlap = 3
 window_len = window_len//chunk_overlap*chunk_overlap	
 window_stride = window_len // chunk_overlap
 target_samples = target_samples//window_len*window_len
-assert target_samples >= 2*window_len
+assert target_samples//window_len >= 30
 
 # prepare windows
 def isftf_recover_coeff_all(sftf_window, isftf_window, chunk_stride, target_samples):
@@ -58,77 +58,6 @@ isftf_window = isftf_window[None, :, None]
 sftf_window = sftf_window[None, :, None]
 recover_coeff_all = recover_coeff_all[None, :, None]
 
-def recursive_loop(voice, noisy, model):
-	"""
-	Brief
-	----------
-	This also contains part of the model
-	It contains STFT, ISTFT, suppression(multiplication) and loss function
-	The model instance will take STFT result and give suppression hint
-
-	Parameters
-	----------
-	voice : Tensor
-		Input tensor of shape (batch_size, target_samples, channels)
-	noisy : Tensor
-		Input tensor of shape (batch_size, target_samples, channels)
-	model : torch.nn.Module
-		Input a recursive model, for example RNN
-
-	Returns
-	-------
-	Tensor Value
-		loss
-	Tensor
-		Output tensor of shape (batch_size, target_samples, channels)
-		The recoverd audio
-	"""
-	hidden_state = None
-	batch_size = voice.shape[0]
-	recover_all = torch.zeros([batch_size,target_samples, target_channels]).to(device)
-	avg_hidden = 0
-	avg_hidden_std = 0
-	for i in range((target_samples-window_len)//window_stride +1):
-		start = i*window_stride
-		end = start+window_len
-		with torch.no_grad():
-			noisy_T = noisy[:,start:end,:]*sftf_window
-			noisy_F = torch.fft.fft(noisy_T, dim = 1)
-		hidden_state, suppression_hint = model(hidden_state, noisy_F.abs())
-		recover_abs = noisy_F.abs()*suppression_hint
-		recover_angle = noisy_F.angle()
-		recover_F = torch.polar(recover_abs, recover_angle)
-		recover_T = torch.fft.ifft(recover_F, dim = 1)
-		recover_all[:,start: end,:] += recover_T.real*isftf_window
-		avg_hidden += torch.mean(hidden_state).detach().to("cpu").numpy().item()
-		avg_hidden_std += torch.std(hidden_state).detach().to("cpu").numpy().item()
-	avg_hidden /= (target_samples-window_len)//window_stride +1
-	print(avg_hidden)
-	print(avg_hidden_std)
-	recover_all *= recover_coeff_all
-	# TODO wrap the following into a new loss function
-	#print(model.scale.detach())
-	#print(loss_func(voice[:,start:end,:], recover_all[:,start:end,:])*100)
-	#print(loss_func(noisy[:,start:end,:], voice[:,start:end,:])*100)
-	#return loss_func(voice[:,start:end,:], recover_all[:,start:end,:])
-
-	loss_window_size = window_len*randint(1, min(5, target_samples//window_len))
-	start = randint(max(0,target_samples-loss_window_size-window_stride-2*window_len), target_samples-loss_window_size-window_len)
-	end = start + loss_window_size
-
-	recover_F_loss_abs, recover_F_loss_angle, voice_F_loss_abs, voice_F_loss_angle = sftf_loss_prepare(recover_all[:,start:end,:], voice[:,start:end,:])
-	avg_db = torch.mean(torch.log(voice_F_loss_abs+1e-7),  1, True)
-	loss = mseloss(torch.clamp(torch.log(recover_F_loss_abs+1e-7), min=avg_db-20), torch.clamp(torch.log(voice_F_loss_abs+1e-7), min=avg_db-20))
-	#loss += 0.3*loss_func(recover_F_loss_angle, voice_F_loss_angle) 
-	print(torch.mean(suppression_hint).to("cpu"))
-	print(loss.to("cpu")*100)
-
-	noisy_F_loss_abs, noisy_F_loss_angle, voice_F_loss_abs, voice_F_loss_angle = sftf_loss_prepare(noisy[:,start:end,:], voice[:,start:end,:])
-	loss_ref = mseloss(torch.clamp(torch.log(noisy_F_loss_abs+1e-7), min=avg_db-20), torch.clamp(torch.log(voice_F_loss_abs+1e-7), min=avg_db-20))
-	print(loss_ref.to("cpu")*100)
-	print(loss/loss_ref*100)
-
-	return loss, recover_all
 
 def train():
 	print(f"use {device}")
@@ -157,13 +86,86 @@ def train():
 		noise = next(iter(noise_dataloader))
 		# voice, noise has same shape (N, samples, channels)
 		noisy = voice + noise
-
 		noisy_F = sftf_a_trace(noisy, window_stride, sftf_window)
-		
-
-
+		# noise_F has shape (frames, N, window_size, channels)
 		if(model.is_recursive):
-			loss, recover_all = recursive_loop(voice, noisy, model)
+			# iterate throught frames
+			hidden_state = None
+			recover_F = torch.zeros(noisy_F.shape, dtype=torch.cfloat).to(device)
+			for i in range(noisy_F.shape[0]):
+				hidden_state, suppression_hint = model(hidden_state, torch.log(noisy_F[i,:,:,:].abs()))
+				recover_F[i,:,:,:] = torch.polar(noisy_F[i,:,:,:].abs()*suppression_hint, noisy_F[i,:,:,:].angle())
+			recover = isftf_a_trace(recover_F, window_stride, sftf_window, isftf_window)
+
+			
+			# def log_mse_loss(recover, voice):
+			# 	avg_db = torch.mean(torch.log(voice+1e-7), 1, True)
+			# 	min_db = avg_db-40
+			# 	loss = mseloss(torch.clamp(torch.log(recover+1e-7), min=min_db), torch.clamp(torch.log(voice+1e-7), min=min_db))
+			# 	return loss
+			# if epoch < 30:
+			# 	voice_F = sftf_a_trace(voice, window_stride, sftf_window)
+			# 	loss = mseloss(recover_F.abs(), voice_F.abs())
+			# 	loss_ref = mseloss(noisy_F.abs(), voice_F.abs())
+			# 	print(loss/loss_ref*100)
+			# else:
+			# 	voice_F = sftf_a_trace(voice, window_stride, sftf_window)
+			# 	loss = mseloss(recover_F[target_samples//window_len//2:,:,:,:].abs(), voice_F[target_samples//window_len//2:,:,:,:].abs())
+			# 	loss_ref = mseloss(noisy_F[target_samples//window_len//2:,:,:,:].abs(), voice_F[target_samples//window_len//2:,:,:,:].abs())
+			# 	print(loss/loss_ref*100)
+
+			# # loss
+			# def log_mse_loss(recover, voice):
+			# 	avg_db = torch.mean(torch.log(voice+1e-7), 1, True)
+			# 	min_db = avg_db-40
+			# 	loss = mseloss(torch.clamp(torch.log(recover+1e-7), min=min_db), torch.clamp(torch.log(voice+1e-7), min=min_db))
+			# 	return loss
+			
+			# if epoch < 30:
+			# 	shift = randint(-window_len, window_len)
+			# 	large_window_len = randint(window_len, 4*window_len)
+			# 	large_sftf_window = hann_window(large_window_len).to(device)[None,:,None]
+			# 	large_stride = 4*large_window_len
+
+			# 	full_trace_loss = log_mse_loss(sftf_a_trace(recover[:,2*window_len+shift:-2*window_len+shift,:], large_stride, large_sftf_window).abs(), sftf_a_trace(voice[:,2*window_len+shift:-2*window_len+shift,:], large_stride, large_sftf_window).abs())
+			# 	full_trace_loss_ref = log_mse_loss(sftf_a_trace(noisy[:,2*window_len+shift:-2*window_len+shift,:], large_stride, large_sftf_window).abs(), sftf_a_trace(voice[:,2*window_len+shift:-2*window_len+shift,:], large_stride, large_sftf_window).abs())
+			# 	print(full_trace_loss/full_trace_loss_ref*100)
+
+			# trail_start = randint(target_samples/2, target_samples-5*window_len)
+			# trail_end = randint(trail_start+window_len, trail_start+4*window_len)
+			# trace_tail_loss = log_mse_loss(sftf_a_frame(recover[:,trail_start:trail_end,:]).abs(), sftf_a_frame(voice[:,trail_start:trail_end,:]).abs())
+			# trace_tail_loss_ref = log_mse_loss(sftf_a_frame(noisy[:,trail_start:trail_end,:]).abs(), sftf_a_frame(voice[:,trail_start:trail_end,:]).abs())
+			# print(trace_tail_loss/trace_tail_loss_ref*100)
+			# fade_coeff = 0.5/(epoch/10+1)
+			# if epoch < 30:
+			# 	loss = fade_coeff*full_trace_loss + (1-fade_coeff)*trace_tail_loss
+			# else:
+			# 	loss = trace_tail_loss
+			# loss finish
+
+			# loss
+			def sdr_loss(recover, voice):
+				return -torch.sum(recover*voice)/torch.sqrt(torch.sum(recover**2)*torch.sum(voice**2))
+			
+			if epoch < 30:
+				full_trace_loss = sdr_loss(recover[:,window_len:-window_len,:], voice[:,window_len:-window_len,:])#+ sdr_loss((noisy - recover)[:,window_len:-window_len,:], noise[:,window_len:-window_len,:])
+				full_trace_loss_ref = sdr_loss(noisy[:,window_len:-window_len,:], voice[:,window_len:-window_len,:])
+				print(full_trace_loss)
+				print(full_trace_loss/full_trace_loss_ref*100)
+
+			trail_start = target_samples//2
+			trail_end = target_samples-window_len
+			trace_tail_loss = sdr_loss(recover[:,trail_start:trail_end,:], voice[:,trail_start:trail_end,:])#+ sdr_loss((noisy - recover)[:,trail_start:trail_end,:], noise[:,trail_start:trail_end,:])
+			trace_tail_loss_ref = sdr_loss(noisy[:,trail_start:trail_end,:], voice[:,trail_start:trail_end,:])
+			print(trace_tail_loss)
+			print(trace_tail_loss/trace_tail_loss_ref*100)
+
+			fade_coeff = 0.5/(epoch/10+1)
+			if epoch < 30:
+				loss = fade_coeff*full_trace_loss + (1-fade_coeff)*trace_tail_loss
+			else:
+				loss = trace_tail_loss
+
 		else:
 			# recover = model(noisy)
 			raise NotImplementedError
@@ -180,15 +182,18 @@ def train():
 			model.eval()
 			with torch.no_grad():
 				if(model.is_recursive):
-					loss, recover_all = recursive_loop(voice, noisy, model)
+					hidden_state = None
+					recover_F = torch.zeros(noisy_F.shape, dtype=torch.cfloat).to(device)
+					for i in range(noisy_F.shape[0]):
+						hidden_state, suppression_hint = model(hidden_state, noisy_F[i,:,:,:].abs())
+						recover_F[i,:,:,:] = torch.polar(noisy_F[i,:,:,:].abs()*suppression_hint, noisy_F[i,:,:,:].angle())
+					recover = isftf_a_trace(recover_F, window_stride, sftf_window, isftf_window)
 				else:
 					raise NotImplementedError
-					# recover_all = model(noisy)
 				torchaudio.save(dump_dir/f"origin_{epoch}.wav", voice[0,:,:].to("cpu")
 ,	target_sample_rate,False,"wav","PCM_F")
-				torchaudio.save(dump_dir/f"noisy_{epoch}.wav", noise[0,:,:].to("cpu")
-+	voice[0,:,:].to("cpu")
+				torchaudio.save(dump_dir/f"noisy_{epoch}.wav", noisy[0,:,:].to("cpu")
 ,	target_sample_rate,False,"wav","PCM_F")
-				torchaudio.save(dump_dir/f"recover_{epoch}.wav", recover_all[0,:,:].to("cpu")
+				torchaudio.save(dump_dir/f"recover_{epoch}.wav", recover[0,:,:].to("cpu")
 ,	target_sample_rate,False,"wav","PCM_F")
 			

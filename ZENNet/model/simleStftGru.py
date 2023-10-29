@@ -44,9 +44,12 @@ class SimpleStftGru(nn.Module):
 		shape_saved = _input.shape
 		_input = reshape(_input, (batch_size,-1))
 		_input_mapped = nn.functional.relu(self.input_map(_input))
-		_state = self.unpacked_gru(state, _input)
-		_output = torch.sigmoid(self.state_input2output(torch.cat([_state, _input_mapped], dim=1)))
+
+		_output = torch.sigmoid(self.state_input2output(torch.cat([state, _input_mapped], dim=1)))
 		_output = reshape(_output, shape_saved)	
+
+		_state = self.unpacked_gru(state, _input)
+
 		return _state, _output
 
 	@property
